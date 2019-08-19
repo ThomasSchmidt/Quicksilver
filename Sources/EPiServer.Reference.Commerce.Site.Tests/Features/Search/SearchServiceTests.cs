@@ -514,7 +514,9 @@ namespace EPiServer.Reference.Commerce.Site.Tests.Features.Search
                 _searchFacadeMock.Object,
                _languageResolverMock.Object,
                 _contentLoaderMock.Object,
-                _localizationService);
+                _localizationService,
+                null,
+                null);
         }
 
         private void SetupSearchResultMock()

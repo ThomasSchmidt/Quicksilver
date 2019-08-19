@@ -22,6 +22,11 @@ using System.Linq;
 using System.Text;
 using System.Web.Helpers;
 using EPiServer.Globalization;
+using Mediachase.Commerce.Pricing;
+using EPiServer.Commerce.Marketing;
+using Mediachase.Commerce.Catalog;
+using EPiServer.Commerce.Order.Internal;
+using EPiServer.Commerce.Order;
 
 namespace EPiServer.Reference.Commerce.Site.Features.Search.Services
 {
@@ -35,6 +40,8 @@ namespace EPiServer.Reference.Commerce.Site.Features.Search.Services
         private readonly LanguageResolver _languageResolver;
         private readonly IContentLoader _contentLoader;
         private readonly LocalizationService _localizationService;
+        private readonly IPromotionEngine _promotionEngine;
+        private readonly ReferenceConverter _referenceConverter;
 
         // Since the site is responsive the rows that the search results can be arranged in is 3/2/1 result per row
         // so we want a default page size to be divisible with all three.
@@ -46,7 +53,9 @@ namespace EPiServer.Reference.Commerce.Site.Features.Search.Services
             SearchFacade search,
             LanguageResolver languageResolver,
             IContentLoader contentLoader,
-            LocalizationService localizationService)
+            LocalizationService localizationService,
+            IPromotionEngine promotionEngine,
+            ReferenceConverter referenceConverter)
         {
             _search = search;
             _currentMarket = currentMarket;
@@ -55,6 +64,8 @@ namespace EPiServer.Reference.Commerce.Site.Features.Search.Services
             _languageResolver = languageResolver;
             _contentLoader = contentLoader;
             _localizationService = localizationService;
+            _promotionEngine = promotionEngine;
+            _referenceConverter = referenceConverter;
         }
 
         public CustomSearchResult Search(IContent currentContent, FilterOptionViewModel filterOptions)
@@ -250,16 +261,22 @@ namespace EPiServer.Reference.Commerce.Site.Features.Search.Services
             var market = _currentMarket.GetCurrentMarket();
             var currency = _currencyService.GetCurrentCurrency();
 
-            return searchResult.Documents.Select(document => new ProductTileViewModel
+            return searchResult.Documents.Select(document => 
             {
-                Brand = GetString(document, "brand"),
-                Code = GetString(document, "code"),
-                DisplayName = GetString(document, "displayname"),
-                PlacedPrice = new Money(GetDecimal(document, IndexingHelper.GetOriginalPriceField(market.MarketId, currency)), currency),
-                DiscountedPrice = new Money(GetDecimal(document, IndexingHelper.GetPriceField(market.MarketId, currency)), currency),
-                ImageUrl = GetString(document, "image_url"),
-                Url = _urlResolver.GetUrl(ContentReference.Parse(GetString(document, "content_link"))),
-                IsAvailable = GetDecimal(document, IndexingHelper.GetOriginalPriceField(market.MarketId, currency)) > 0 || GetString(document, "_classtype") == "bundle"
+                var code = GetString(document, "code");
+                var placedPrice = new Money(GetDecimal(document, IndexingHelper.GetOriginalPriceField(market.MarketId, currency)), currency);
+                var discountedPrice = GetDiscountedPrice(code, placedPrice, market);
+                return new ProductTileViewModel
+                {
+                    Brand = GetString(document, "brand"),
+                    Code = GetString(document, "code"),
+                    DisplayName = GetString(document, "displayname"),
+                    PlacedPrice = placedPrice,
+                    DiscountedPrice = discountedPrice,
+                    ImageUrl = GetString(document, "image_url"),
+                    Url = _urlResolver.GetUrl(ContentReference.Parse(GetString(document, "content_link"))),
+                    IsAvailable = GetDecimal(document, IndexingHelper.GetOriginalPriceField(market.MarketId, currency)) > 0 || GetString(document, "_classtype") == "bundle"
+                };
             });
         }
 
@@ -364,6 +381,45 @@ namespace EPiServer.Reference.Commerce.Site.Features.Search.Services
             }
             configFilter.Values.SimpleValue = nodeValues;
             return configFilter;
+        }
+
+        private Money GetDiscountedPrice(string code, decimal placedPrice, IMarket market)
+        {
+            var inMemoryOrderGroup = new InMemoryOrderGroup(market, market.DefaultCurrency);
+
+            inMemoryOrderGroup.AddLineItem(new InMemoryLineItem
+            {
+                Quantity = decimal.One,
+                PlacedPrice = placedPrice,
+                Code = code
+            });
+
+            // calculate discounts
+            var settings = new PromotionEngineSettings()
+            {
+                ApplyReward = false,
+                RequestedStatuses = RequestFulfillmentStatus.Fulfilled
+            };
+            var rewardDescriptions = _promotionEngine
+                .Run(inMemoryOrderGroup, settings);
+
+            var affectedEntries = rewardDescriptions
+                .SelectMany(rd => rd.Redemptions)
+                .Where(r => r.AffectedEntries != null)
+                .SelectMany(r => r.AffectedEntries.PriceEntries);
+
+            var affectedEntry = affectedEntries.FirstOrDefault(ae => ae.ParentItem.Code.Equals(code, StringComparison.OrdinalIgnoreCase));
+            if (affectedEntry != null)
+            {
+                var savedAmount = affectedEntry.OriginalTotal - affectedEntry.CalculatedTotal;
+                var discountPrice = new PriceValue();
+                return new Money(affectedEntry.CalculatedTotal, market.DefaultCurrency);
+            }
+            else
+            {
+                var priceValue = new PriceValue();
+                return new Money(placedPrice, market.DefaultCurrency);
+            }
         }
     }
 }
